@@ -258,7 +258,7 @@ def safe_json_parse(text: str, client: OpenAI | None = None) -> dict[str, Any]:
     return _parse_json_object(repaired)
 
 
-# Exercise 4: ask for step-by-step ranking and validate against computed means.
+# Exercise 4: compare model-provided rankings with transparent local calculations.
 SCORE_TEST_CASES: tuple[dict[str, dict[str, float]], ...] = (
     {
         "Model-A": {"math": 95, "coding": 90, "reasoning": 92},
@@ -317,10 +317,11 @@ def expected_model_ranking(
 
 def build_cot_prompt(scores: dict[str, dict[str, float]]) -> str:
     return f"""Rank these models using the mean of their scores across all three tasks.
-Think through the calculations before deciding the order. Give a recommendation
-in exactly two sentences. Return only a JSON object with this shape:
-{{"ranking": [{{"model": "name", "average_score": 0.0}}], "recommendation": "Two sentences."}}
-Scores (each model has three task scores):
+For each model, include the three source scores and the calculated mean in the JSON
+output so the result can be checked. Give a recommendation in exactly two sentences.
+Return only a JSON object with this shape:
+{{"ranking": [{{"model": "name", "scores": {{"math": 0, "coding": 0, "reasoning": 0}}, "average_score": 0.0}}], "recommendation": "Two sentences."}}
+Scores:
 {json.dumps(scores, indent=2)}"""
 
 
@@ -336,7 +337,7 @@ def rank_models_with_cot(
         messages=[
             {
                 "role": "system",
-                "content": "Follow the requested scoring rule exactly and return valid JSON.",
+                "content": "Calculate the requested means and return valid JSON with the source scores.",
             },
             {"role": "user", "content": build_cot_prompt(scores)},
         ],
@@ -359,6 +360,8 @@ def validate_cot_result(
     if [item.get("model") for item in ranking] != [item["model"] for item in expected]:
         raise ValueError("Model order does not match the descending mean scores")
     for actual, target in zip(ranking, expected):
+        if actual.get("scores") != scores[target["model"]]:
+            raise ValueError(f"Incorrect source scores for {target['model']}")
         if abs(float(actual["average_score"]) - float(target["average_score"])) > 0.02:
             raise ValueError(f"Incorrect average score for {target['model']}")
     if not isinstance(recommendation, str) or len(
@@ -375,6 +378,7 @@ def verify_cot_prompt_on_three_inputs(
 
 
 def run_local_tests() -> None:
+    print("Exercise 2: rendering and persisting a prompt template")
     library = PromptLibrary()
     template = PromptTemplate(
         name="qa",
@@ -384,41 +388,92 @@ def run_local_tests() -> None:
     )
     library.add(template)
     library.record_evaluation("qa")
-    assert template.render(domain="Python", question="What is a list?")[0] == "You are a Python expert."
+    rendered = template.render(domain="Python", question="What is a list?")
+    print(f"Rendered system prompt: {rendered[0]}")
+    print(f"Rendered user prompt: {rendered[1]}")
+    assert rendered[0] == "You are a Python expert."
     temporary_path = Path("prompt-library-test.json")
     try:
         library.save(temporary_path)
+        print(f"Saved prompt library to temporary file: {temporary_path}")
         loaded = PromptLibrary.load(temporary_path)
+        print(
+            f"Reloaded template version: {loaded.get('qa').version}; "
+            f"last evaluated versions: {loaded.last_evaluated_versions}"
+        )
         assert loaded.last_evaluated_versions == {"qa": "1.1"}
         assert loaded.get("qa").version == "1.1"
     finally:
         temporary_path.unlink(missing_ok=True)
 
-    assert safe_json_parse('{"valid": true}') == {"valid": True}
-    assert safe_json_parse('```json\n{"valid": true}\n```') == {"valid": True}
-    for scores in SCORE_TEST_CASES:
+    print("\nExercise 3: parsing valid JSON and removing markdown fences")
+    plain_json = '{"valid": true}'
+    fenced_json = '```json\n{"valid": true}\n```'
+    print(f"Plain input: {plain_json} -> {safe_json_parse(plain_json)}")
+    print(f"Fenced input: {fenced_json} -> {_strip_markdown_fences(fenced_json)}")
+    assert safe_json_parse(plain_json) == {"valid": True}
+    assert safe_json_parse(fenced_json) == {"valid": True}
+
+    print("\nExercise 4: calculating and validating rankings for all score sets")
+    for case_number, scores in enumerate(SCORE_TEST_CASES, start=1):
         expected = expected_model_ranking(scores)
+        for model, task_scores in scores.items():
+            arithmetic = " + ".join(str(value) for value in task_scores.values())
+            print(
+                f"Input {case_number} | {model}: ({arithmetic}) / "
+                f"{len(task_scores)} = "
+                f"{sum(task_scores.values()) / len(task_scores):.2f}"
+            )
         validate_cot_result(
             scores,
             {
-                "ranking": expected,
+                "ranking": [
+                    {**item, "scores": scores[item["model"]]} for item in expected
+                ],
                 "recommendation": "Choose the highest average score. Validate this choice against task-specific requirements.",
             },
+        )
+        print(
+            "Validated descending order: "
+            + " > ".join(item["model"] for item in expected)
         )
 
 
 def run_api_exercises() -> None:
     client = create_client()
-    _, summary = evaluate_review_prompts(client=client)
-    print("Code review prompt comparison:")
+    details, summary = evaluate_review_prompts(client=client)
+    print("Exercise 1: detailed code-review responses and heuristic scoring")
+    for row in details.to_dict(orient="records"):
+        print(
+            f"\nPrompt level: {row['prompt_level']} | case: {row['case']} | "
+            f"matched concepts: {row['matched_concepts']}/{row['expected_concepts']} | "
+            f"score: {row['quality_score']:.2f}"
+        )
+        print(row["response_text"])
+    print("\nSummary calculated from all 15 detailed responses:")
     print(summary.to_string(index=False))
-    print("\nJSON repair:")
-    print(safe_json_parse('{"model": "Qwen", score: 92}', client=client))
-    print("\nCoT ranking checks:")
-    for case_number, result in enumerate(
-        verify_cot_prompt_on_three_inputs(client=client), start=1
+
+    malformed_json = '{"model": "Qwen", score: 92}'
+    print("\nExercise 3: JSON repair")
+    print(f"Input (invalid JSON): {malformed_json}")
+    repaired = safe_json_parse(malformed_json, client=client)
+    print(f"Repaired object:\n{json.dumps(repaired, indent=2)}")
+
+    print("\nExercise 4: ranking inputs, computed means, and validated model responses")
+    results = verify_cot_prompt_on_three_inputs(client=client)
+    for case_number, (scores, result) in enumerate(
+        zip(SCORE_TEST_CASES, results), start=1
     ):
-        print(f"Input {case_number}: top model = {result['ranking'][0]['model']}")
+        print(f"\nInput {case_number}: source scores")
+        for model, task_scores in scores.items():
+            arithmetic = " + ".join(str(value) for value in task_scores.values())
+            print(
+                f"{model}: ({arithmetic}) / {len(task_scores)} = "
+                f"{sum(task_scores.values()) / len(task_scores):.2f}"
+            )
+        print("Validated response:")
+        print(json.dumps(result, indent=2))
+        print(f"Recommendation: {result['recommendation']}")
 
 
 if __name__ == "__main__":

@@ -386,6 +386,7 @@ def _hash_embed(texts: list[str], model: str) -> np.ndarray:
 
 
 def run_local_tests() -> None:
+    print("Exercise 1: finding duplicate documents")
     pairs = DuplicateDetector(
         CORPUS_50,
         threshold=0.99,
@@ -393,29 +394,65 @@ def run_local_tests() -> None:
     ).find_duplicates()
     assert len(CORPUS_50) == 50
     assert any(pair.first_index == 0 and pair.second_index == 49 for pair in pairs)
+    print(f"Documents embedded: {len(CORPUS_50)}; similarity threshold: 0.99.")
+    for pair in pairs:
+        print(
+            f"Duplicate pair ({pair.first_index}, {pair.second_index}), "
+            f"similarity={pair.similarity:.4f}:\n"
+            f"  first:  {pair.first_text}\n"
+            f"  second: {pair.second_text}"
+        )
 
+    print("\nExercise 2: hybrid semantic and keyword search")
     hybrid = HybridSearch(
         ["red apple fruit", "blue car vehicle", "green apple tree"],
         alpha=0.0,
         embed_fn=_hash_embed,
     )
-    assert hybrid.search("apple", k=1)[0].document in {
+    query = "apple"
+    results = hybrid.search(query, k=3)
+    assert results[0].document in {
         "red apple fruit",
         "green apple tree",
     }
+    print(f"Query: {query!r}; alpha={hybrid.alpha}; returned {len(results)} results.")
+    for rank, result in enumerate(results, start=1):
+        print(
+            f"{rank}. {result.document} | combined={result.score:.4f} | "
+            f"semantic={result.semantic_score:.4f} | "
+            f"keyword={result.keyword_score:.4f}"
+        )
 
+    print("\nExercise 3: vector-store add, search, update, and delete")
     store = VectorStore(embed_fn=_hash_embed)
-    store.add_documents(
-        [VectorDocument("a", "alpha document"), VectorDocument("b", "beta document")]
-    )
+    initial_documents = [
+        VectorDocument("a", "alpha document"),
+        VectorDocument("b", "beta document"),
+    ]
+    store.add_documents(initial_documents)
     assert store._matrix.shape == (2, 32)
+    print(f"Added ids ['a', 'b']; size={store.size}; matrix={store._matrix.shape}.")
+    initial_results = store.search("alpha", k=2)
+    for result in initial_results:
+        print(
+            f"Initial search rank {result.rank}: id={result.document.id}, "
+            f"text={result.document.text!r}, score={result.score:.4f}"
+        )
+
     store.update("a", "updated alpha document")
     assert store._matrix.shape == (2, 32)
     assert store._documents[0].text == "updated alpha document"
+    print(
+        f"Updated id 'a': text={store._documents[0].text!r}; "
+        f"matrix={store._matrix.shape}."
+    )
     assert store.delete("b") is True
     assert store._matrix.shape == (1, 32)
+    print(f"Deleted id 'b': size={store.size}; matrix={store._matrix.shape}.")
     assert store.delete("missing") is False
+    print(f"Deleting missing id returned False; size remains {store.size}.")
 
+    print("\nExercise 4: persistent embedding-cache hits and misses")
     calls: list[list[str]] = []
 
     def counting_embedder(batch: list[str], model: str) -> np.ndarray:
@@ -439,8 +476,18 @@ def run_local_tests() -> None:
         assert first.shape == (3, 32)
         assert second.shape == (2, 32)
         assert calls == [["same", "other"], ["new"]]
+        print("Request 1: ['same', 'same', 'other']")
+        print(
+            f"  unique cache misses sent to embedder: {calls[0]}; "
+            f"returned shape={first.shape}"
+        )
+        print("Request 2: ['same', 'new']")
+        print(
+            f"  cache hit: 'same'; unique cache miss sent to embedder: {calls[1]}; "
+            f"returned shape={second.shape}"
+        )
 
 
 if __name__ == "__main__":
     run_local_tests()
-    print("Module 08 exercise tests passed (mock embeddings; no API requests).")
+    print("\nAll Module 08 exercises passed (deterministic mock embeddings; no API requests).")

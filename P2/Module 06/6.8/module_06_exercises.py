@@ -1,6 +1,7 @@
 """Module 06 exercises using the xKiro OpenAI-compatible API."""
 
 import asyncio
+import argparse
 import os
 import time
 from pathlib import Path
@@ -38,6 +39,7 @@ def retry_on_rate_limit(
     max_retries: int = 5,
     model: str = DEFAULT_MODEL,
     base_delay: float = 1.0,
+    show_progress: bool = False,
 ) -> Any:
     """Retry rate-limited chat calls with exponential backoff.
 
@@ -51,6 +53,8 @@ def retry_on_rate_limit(
 
     for attempt in range(max_retries + 1):
         try:
+            if show_progress:
+                print(f"Attempt {attempt + 1}/{max_retries + 1}: sending request...")
             return client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -59,6 +63,8 @@ def retry_on_rate_limit(
             if attempt == max_retries:
                 raise
             delay = base_delay * (2**attempt)
+            if show_progress:
+                print(f"Rate limit received; retrying in {delay:.2f} seconds.")
             time.sleep(delay)
 
     raise RuntimeError("Retry loop exited unexpectedly")
@@ -157,6 +163,7 @@ def stream_to_file(
     prompt: str,
     output_path: str | Path,
     model: str = DEFAULT_MODEL,
+    show_progress: bool = False,
 ) -> None:
     """Stream a chat completion to a UTF-8 file, flushing each received chunk."""
     client = create_client()
@@ -171,6 +178,8 @@ def stream_to_file(
             if text:
                 output_file.write(text)
                 output_file.flush()
+                if show_progress:
+                    print(text, end="", flush=True)
 
 
 def _test_retry_with_mock() -> None:
@@ -201,27 +210,93 @@ def _test_retry_with_mock() -> None:
             [{"role": "user", "content": "test"}],
             max_retries=3,
             base_delay=0.25,
+            show_progress=True,
         )
 
     assert result == {"content": "success"}
     assert client.chat.completions.calls == 3
     assert [call.args[0] for call in sleep.call_args_list] == [0.25, 0.5]
+    print("Retry trace: 2 rate limits -> waits [0.25, 0.50]s -> success on attempt 3.")
 
 
 def _test_token_budget() -> None:
     manager = TokenBudgetManager(token_limit=10)
     manager.record_usage(input_tokens=4, output_tokens=3)
+    print(
+        "Token budget step 1: input=4, output=3, "
+        f"total={manager.total_tokens}/{manager.token_limit}."
+    )
     assert manager.total_tokens == 7
     try:
         manager.record_usage(input_tokens=2, output_tokens=2)
     except BudgetExceeded:
-        pass
+        print(
+            "Token budget step 2: adding input=2 and output=2 raises "
+            f"BudgetExceeded at total={manager.total_tokens}/{manager.token_limit}."
+        )
     else:
         raise AssertionError("Expected BudgetExceeded")
 
 
+async def run_api_exercises() -> None:
+    prompt = "Explain why exponential backoff helps with rate limits in two sentences."
+    client = create_client()
+
+    print("\nExercise 1: retrying a live completion")
+    response = retry_on_rate_limit(
+        client,
+        [{"role": "user", "content": prompt}],
+        model=DEFAULT_MODEL,
+        show_progress=True,
+    )
+    print("Completion:")
+    print(response.choices[0].message.content or "")
+
+    print("\nExercise 2: recording usage from that completion")
+    budget = TokenBudgetManager(token_limit=4096)
+    total = budget.record_response(response)
+    print(
+        f"Input tokens: {budget.input_tokens}; output tokens: {budget.output_tokens}; "
+        f"total: {total}/{budget.token_limit}."
+    )
+
+    print("\nExercise 3: comparing model output, token usage, and latency")
+    comparisons = await compare_models(prompt, [DEFAULT_MODEL])
+    for row in comparisons.to_dict(orient="records"):
+        print(f"Model: {row['model']}")
+        print(f"Response: {row['response_text']}")
+        print(
+            f"Input tokens: {row['input_tokens']}; "
+            f"output tokens: {row['output_tokens']}; "
+            f"latency: {row['latency_ms']} ms."
+        )
+
+    output_path = Path("module_06_streamed_response.txt")
+    print("\nExercise 4: streaming completion chunks to disk and console")
+    stream_to_file(
+        prompt,
+        output_path,
+        model=DEFAULT_MODEL,
+        show_progress=True,
+    )
+    print(f"\nFull streamed response saved to: {output_path.resolve()}")
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--run-api-exercises",
+        action="store_true",
+        help="Run all four exercises against xKiro (uses API quota).",
+    )
+    arguments = parser.parse_args()
+
+    print("Exercise 1: simulated rate-limit retry")
     _test_retry_with_mock()
+    print("\nExercise 2: simulated token-budget accounting")
     _test_token_budget()
-    print("Mock retry and token-budget tests passed.")
-    print("compare_models() and stream_to_file() are ready for xKiro API calls.")
+    print("\nLocal mock exercises completed successfully.")
+    if arguments.run_api_exercises:
+        asyncio.run(run_api_exercises())
+    else:
+        print("Use --run-api-exercises to display the full xKiro API exercise output.")

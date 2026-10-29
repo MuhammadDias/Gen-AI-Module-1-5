@@ -30,4 +30,4 @@ response = client.chat.completions.create(
 
 result = json.loads(response.choices[0].message.content or "{}")
 print(result)
-{'people': ['Elon Musk'], 'organizations': ['SpaceX', 'Tesla'], 'locations': ['Hawthorne, California']}
+# {'people': ['Elon Musk'], 'organizations': ['SpaceX', 'Tesla'], 'locations': ['Hawthorne, California']}
